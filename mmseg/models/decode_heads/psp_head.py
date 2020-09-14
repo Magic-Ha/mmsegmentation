@@ -124,6 +124,7 @@ class DDPSPHead(PSPHead):
         #TODO:以后可以在整整attention什么的整一个不用gloabal pooling的版本 搞成动态卷积哪样的
         self.ds_num = np.array(self.conv_seg.weight.size()).prod()
         self.dsb_num = np.array(self.conv_seg.bias.size()).prod()
+
         self.f_compact = nn.Conv2d(2048, self.num_classes, kernel_size=3, padding=1)
         self.generator_w = nn.Conv2d((2 * self.num_classes), self.ds_num, kernel_size=1, groups=self.num_classes)
         self.generator_b = nn.Conv2d((2 * self.num_classes), self.dsb_num, kernel_size=1, groups=self.num_classes)
@@ -160,8 +161,14 @@ class DDPSPHead(PSPHead):
             temp = temp.detach()
             coarse_output = coarse_output.detach()
             f = self.f_compact(x.detach())
+            if mode == 'stage2':
+                f.retain_grad()
             delta_p = self.generator_w(torch.cat([coarse_output, f], dim=1))
+            delta_b = self.generator_b(torch.cat([coarse_output, f], dim=1))
+
             delta_p = nn.functional.adaptive_avg_pool2d(delta_p, (1, 1))
+            delta_b = nn.functional.adaptive_avg_pool2d(delta_b, (1, 1))
+
             #conv_seg的weight形状应该是[class_num, channel, 1, 1]
             #现在delta_p 还是[B,ds_num,1,1],所以要想办法把它每张图分别搞成一个weight
             #然后每张图分别去生成自己的final_ds
@@ -174,19 +181,27 @@ class DDPSPHead(PSPHead):
             #所以final_ds输入通道应该是B*channel，输出通道应该是B*class_num
             #所以分组卷积的final_ds的weight形状应该是 [B*class_num, channel, kernel, kernel]
             delta_p = delta_p.view(delta_p.size()[0], self.num_classes, -1, 1, 1)#1*1 kernel size
+            delta_b = delta_b.view(delta_b.size()[0], self.num_classes)
+            # bias.size()就是out_channels 一个一维度的tensor
+
             if self.weight_mode == 'sum':
                 if self.sum_weight is not None:
                     new_weight = delta_p * self.sum_weight[0] + self.conv_seg.weight.detach() * self.sum_weight[1]
+                    new_bias = delta_b * self.sum_weight[0] + self.conv_seg.bias.detach() * self.sum_weight[1]
+
                 else:
                     new_weight = delta_p + self.conv_seg.weight.detach()
+                    new_bias = delta_b
             else:
                 new_weight = delta_p
             new_weight = new_weight.view([batch_size * self.num_classes, -1, 1, 1])
-            bias = self.conv_seg.bias.repeat(batch_size).detach()
+            new_bias = new_bias.view([batch_size * self.num_classes])
+            # bias = self.conv_seg.bias.repeat(batch_size).detach()
+
             #TODO: 目前这个还没写动态生成bias，以后可以搞
 
             output = nn.functional.conv2d((temp.view(1, -1, temp.size()[(-2)], temp.size()[(-1)])), new_weight,
-              bias, groups=batch_size)
+              new_bias, groups=batch_size)
             output = output.view(coarse_output.size())
             if mode == 'stage2':
                 return (
