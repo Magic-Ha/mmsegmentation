@@ -1,14 +1,13 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from mmcv.cnn import ConvModule
+from mmcv.runner import force_fp32
 
 from mmseg.ops import resize
 from ..builder import HEADS
-from .decode_head import BaseDecodeHead
-
 from ..losses import accuracy
-import numpy as np
-from mmcv.runner import force_fp32
+from .decode_head import BaseDecodeHead
 
 
 class PPM(nn.ModuleList):
