@@ -213,7 +213,10 @@ class DDPSPHead(PSPHead):
 
                 else:
                     new_weight = delta_p + self.conv_seg.weight.detach()
-                    new_bias = delta_b
+                    # FIXME:明天要重新跑啊，真是憨批 这怎么没加上啊 你妈的
+                    # 建议整个条幅贴屏幕上“检查下新代码”
+                    # 今天跑的是“new_bias = delta_b”
+                    new_bias = delta_b + self.conv_seg.bias.detach()
             else:
                 new_weight = delta_p
             new_weight = new_weight.view([batch_size * self.num_classes,
