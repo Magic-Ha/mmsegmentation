@@ -110,6 +110,7 @@ class DDPSPHead(PSPHead):
     def __init__(self, pool_scales=(1, 2, 3, 6), **kwargs):
         self.weight_mode = kwargs.pop('weight_mode')
         self.sum_weight = kwargs.pop('sum_weight')
+        self.with_bias = kwargs.pop('with_bias')
         (super(DDPSPHead, self).__init__)(**kwargs)
         self.freeze_parameters()
         assert isinstance(pool_scales, (list, tuple))
@@ -133,11 +134,14 @@ class DDPSPHead(PSPHead):
             self.ds_num,
             kernel_size=1,
             groups=self.num_classes)
-        self.generator_b = nn.Conv2d(
-            (2 * self.num_classes),
-            self.dsb_num,
-            kernel_size=1,
-            groups=self.num_classes)
+        if self.with_bias:
+            self.fb_compact = nn.Conv2d(2048, self.num_classes,
+                                   kernel_size=3, padding=1)
+            self.generator_b = nn.Conv2d(
+                (2 * self.num_classes),
+                self.dsb_num,
+                kernel_size=1,
+                groups=self.num_classes)
         # self.generator = nn.Conv2d(self.num_classes,
         #                            int(self.ds_num/self.num_classes),
         #                            kernel_size=1)
@@ -175,13 +179,12 @@ class DDPSPHead(PSPHead):
             temp = temp.detach()
             coarse_output = coarse_output.detach()
             f = self.f_compact(x.detach())
-            if mode == 'stage2':
-                f.retain_grad()
+            # if mode == 'stage2':
+            #     f.retain_grad()
             delta_p = self.generator_w(torch.cat([coarse_output, f], dim=1))
-            delta_b = self.generator_b(torch.cat([coarse_output, f], dim=1))
-
+            # delta_p.retain_grad()
             delta_p = nn.functional.adaptive_avg_pool2d(delta_p, (1, 1))
-            delta_b = nn.functional.adaptive_avg_pool2d(delta_b, (1, 1))
+
 
             # conv_seg的weight形状应该是[class_num, channel, 1, 1]
             # 现在delta_p 还是[B,ds_num,1,1],所以要想办法把它每张图分别搞成一个weight
@@ -200,39 +203,48 @@ class DDPSPHead(PSPHead):
             #                   [B*class_num, channel, kernel, kernel]
             delta_p = delta_p.view(batch_size, self.num_classes, -1, 1, 1)
             # 1*1 kernel size
-            delta_b = delta_b.view(batch_size, self.num_classes)
+
             # bias.size()就是out_channels 一个一维度的tensor
 
             if self.weight_mode == 'sum':
                 if self.sum_weight is not None:
                     new_weight = delta_p * self.sum_weight[0] + \
                         self.conv_seg.weight.detach() * self.sum_weight[1]
-                    new_bias = delta_b * self.sum_weight[0] + \
-                        self.conv_seg.bias.detach() * self.sum_weight[1]
-
                 else:
                     new_weight = delta_p + self.conv_seg.weight.detach()
-                    # FIXME:明天要重新跑啊，真是憨批 这怎么没加上啊 你妈的
-                    # 建议整个条幅贴屏幕上“检查下新代码”
-                    # 今天跑的是“new_bias = delta_b”
-                    new_bias = delta_b + self.conv_seg.bias.detach()
             else:
                 new_weight = delta_p
+            # bias
+            if self.with_bias:
+                fb = self.fb_compact(x.detach())
+                # if mode == 'stage2':
+                #     fb.retain_grad()
+                delta_b = self.generator_b(torch.cat([coarse_output, fb], dim=1))
+                delta_b = nn.functional.adaptive_avg_pool2d(delta_b, (1, 1))
+                delta_b = delta_b.view(batch_size, self.num_classes)
+                if self.weight_mode == 'sum':
+                    if self.sum_weight is not None:
+                        new_bias = delta_b * self.sum_weight[0] + \
+                            self.conv_seg.bias.detach() * self.sum_weight[1]
+
+                    else:
+                        new_bias = delta_b + self.conv_seg.bias.detach()
+                else:
+                    new_bias = delta_b
+            else:
+                new_bias = self.conv_seg.bias.repeat(batch_size).detach()
+
             new_weight = new_weight.view([batch_size * self.num_classes,
                                          -1, 1, 1])
             new_bias = new_bias.view([batch_size * self.num_classes])
             # bias = self.conv_seg.bias.repeat(batch_size).detach()
-
-            # TODO: 目前这个还没写动态生成bias，以后可以搞
-
             output = nn.functional.conv2d((temp.view(1, -1, temp.size()[(-2)],
                                            temp.size()[(-1)])),
                                           new_weight,
                                           new_bias, groups=batch_size)
             output = output.view(coarse_output.size())
             if mode == 'stage2':
-                return (
-                 output, coarse_output)
+                return (output, coarse_output)
             return output
 
     @force_fp32(apply_to=('seg_logit', 'coarse_logit'))
@@ -252,21 +264,21 @@ class DDPSPHead(PSPHead):
             align_corners=(self.align_corners))
         if self.sampler is not None:
             seg_weight = self.sampler.sample(seg_logit, seg_label)
-            coarse_seg_weight = self.sampler.sample(coarse_logit, seg_label)
+            # coarse_seg_weight = self.sampler.sample(coarse_logit, seg_label)
         else:
             seg_weight = None
-            coarse_seg_weight = None
+            # coarse_seg_weight = None
         seg_label = seg_label.squeeze(1)
         loss['fix_loss_seg'] = self.loss_decode(
             seg_logit,
             seg_label,
             weight=seg_weight,
             ignore_index=(self.ignore_index))
-        loss['coarse_loss_seg'] = self.loss_decode(
-            coarse_logit,
-            seg_label,
-            weight=coarse_seg_weight,
-            ignore_index=(self.ignore_index))
+        # loss['coarse_loss_seg'] = self.loss_decode(
+        #     coarse_logit,
+        #     seg_label,
+        #     weight=coarse_seg_weight,
+        #     ignore_index=(self.ignore_index))
         loss['acc_seg'] = accuracy(seg_logit, seg_label)
         loss['acc_seg_coarse'] = accuracy(coarse_logit, seg_label)
         return loss
