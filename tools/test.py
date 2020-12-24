@@ -64,6 +64,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # args.aug_test = True
+    print(args.aug_test)
 
     assert args.out or args.eval or args.format_only or args.show \
         or args.show_dir, \
@@ -88,6 +90,7 @@ def main():
         cfg.data.test.pipeline[1].img_ratios = [
             0.5, 0.75, 1.0, 1.25, 1.5, 1.75
         ]
+        print('cfg')
         cfg.data.test.pipeline[1].flip = True
     cfg.model.pretrained = None
     cfg.data.test.test_mode = True
@@ -106,6 +109,7 @@ def main():
         dataset,
         samples_per_gpu=1,
         workers_per_gpu=cfg.data.workers_per_gpu,
+        # workers_per_gpu=1,
         dist=distributed,
         shuffle=False)
 
@@ -136,6 +140,7 @@ def main():
             dataset.format_results(outputs, **kwargs)
         if args.eval:
             dataset.evaluate(outputs, args.eval, **kwargs)
+            #这个地方做整个数据集的评价,他写在dataset里面了
 
 
 if __name__ == '__main__':

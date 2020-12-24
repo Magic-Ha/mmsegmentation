@@ -81,33 +81,35 @@ class EncoderDecoder(BaseSegmentor):
             x = self.neck(x)
         return x
 
-    def encode_decode(self, img, img_metas):
+    def encode_decode(self, img, img_metas, **kwargs):
         """Encode images with backbone and decode into a semantic segmentation
         map of the same size as input."""
         x = self.extract_feat(img)
-        out = self._decode_head_forward_test(x, img_metas)
-        out = resize(
-            input=out,
-            size=img.shape[2:],
-            mode='bilinear',
-            align_corners=self.align_corners)
+        out = self._decode_head_forward_test(x, img_metas, img, **kwargs)
+        if out.shape[2:] != img.shape[2:]:
+            out = resize(
+                input=out,
+                size=img.shape[2:],
+                mode='bilinear',
+                align_corners=self.align_corners)
         return out
 
-    def _decode_head_forward_train(self, x, img_metas, gt_semantic_seg):
+    def _decode_head_forward_train(self, x, img_metas, gt_semantic_seg, img=None):
         """Run forward function and calculate loss for decode head in
         training."""
         losses = dict()
         loss_decode = self.decode_head.forward_train(x, img_metas,
                                                      gt_semantic_seg,
-                                                     self.train_cfg)
+                                                     self.train_cfg, img=img)
 
         losses.update(add_prefix(loss_decode, 'decode'))
         return losses
 
-    def _decode_head_forward_test(self, x, img_metas):
+    def _decode_head_forward_test(self, x, img_metas, img=None, **kwargs):
         """Run forward function and calculate loss for decode head in
         inference."""
-        seg_logits = self.decode_head.forward_test(x, img_metas, self.test_cfg)
+        # kwargs['img'] = img
+        seg_logits = self.decode_head.forward_test(x, img_metas, self.test_cfg, **kwargs)
         return seg_logits
 
     def _auxiliary_head_forward_train(self, x, img_metas, gt_semantic_seg):
@@ -155,7 +157,7 @@ class EncoderDecoder(BaseSegmentor):
         losses = dict()
 
         loss_decode = self._decode_head_forward_train(x, img_metas,
-                                                      gt_semantic_seg)
+                                                      gt_semantic_seg, img)
         losses.update(loss_decode)
 
         if self.with_auxiliary_head:
@@ -166,7 +168,7 @@ class EncoderDecoder(BaseSegmentor):
         return losses
 
     # TODO refactor
-    def slide_inference(self, img, img_meta, rescale):
+    def slide_inference(self, img, img_meta, rescale, **kwargs):
         """Inference by sliding-window with overlap."""
 
         h_stride, w_stride = self.test_cfg.stride
@@ -209,10 +211,10 @@ class EncoderDecoder(BaseSegmentor):
                 warning=False)
         return preds
 
-    def whole_inference(self, img, img_meta, rescale):
+    def whole_inference(self, img, img_meta, rescale, **kwargs):
         """Inference with full image."""
 
-        seg_logit = self.encode_decode(img, img_meta)
+        seg_logit = self.encode_decode(img, img_meta, **kwargs)
         if rescale:
             seg_logit = resize(
                 seg_logit,
@@ -223,7 +225,7 @@ class EncoderDecoder(BaseSegmentor):
 
         return seg_logit
 
-    def inference(self, img, img_meta, rescale):
+    def inference(self, img, img_meta, rescale, **kwargs):
         """Inference with slide/whole style.
 
         Args:
@@ -243,9 +245,9 @@ class EncoderDecoder(BaseSegmentor):
         ori_shape = img_meta[0]['ori_shape']
         assert all(_['ori_shape'] == ori_shape for _ in img_meta)
         if self.test_cfg.mode == 'slide':
-            seg_logit = self.slide_inference(img, img_meta, rescale)
+            seg_logit = self.slide_inference(img, img_meta, rescale, **kwargs)
         else:
-            seg_logit = self.whole_inference(img, img_meta, rescale)
+            seg_logit = self.whole_inference(img, img_meta, rescale, **kwargs)
         output = F.softmax(seg_logit, dim=1)
         flip = img_meta[0]['flip']
         if flip:
@@ -258,9 +260,9 @@ class EncoderDecoder(BaseSegmentor):
 
         return output
 
-    def simple_test(self, img, img_meta, rescale=True):
+    def simple_test(self, img, img_meta, rescale=True, **kwargs):
         """Simple test with single image."""
-        seg_logit = self.inference(img, img_meta, rescale)
+        seg_logit = self.inference(img, img_meta, rescale, **kwargs)
         seg_pred = seg_logit.argmax(dim=1)
         if torch.onnx.is_in_onnx_export():
             return seg_pred

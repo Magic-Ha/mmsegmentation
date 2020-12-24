@@ -26,6 +26,7 @@ model = dict(
         weight_mode='sum',
         with_bias=True,
         sum_weight=None,
+        with_error_ds=False,
         # norm_cfg=dict(type='SyncBN', requires_grad=True),
         norm_cfg=norm_cfg,
         align_corners=False,
@@ -176,11 +177,11 @@ load_from = 'checkpoints/pspnet_r50-d8_512x512_80k_ade20k_20200615_014128-15a8b9
 resume_from = None
 workflow = [('train', 1)]
 cudnn_benchmark = True
-optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0005,
-                 paramwise_cfg = dict(custom_keys={'decode_head.f_compact.weight': dict(lr_mult=0.5),
-                                                   'decode_head.f_compact.bias': dict(lr_mult=0.5),
-                                                   'decode_head.fb_compact.bias': dict(lr_mult=0.5),
-                                                   'decode_head.fb_compact.weight': dict(lr_mult=0.5)})
+optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0005
+                #  paramwise_cfg = dict(custom_keys={'decode_head.f_compact.weight': dict(lr_mult=0.5),
+                #                                    'decode_head.f_compact.bias': dict(lr_mult=0.5),
+                #                                    'decode_head.fb_compact.bias': dict(lr_mult=0.5),
+                #                                    'decode_head.fb_compact.weight': dict(lr_mult=0.5)})
                 )
 optimizer_config = dict()
 lr_config = dict(policy='poly', power=0.9, min_lr=0.0001, by_epoch=False)

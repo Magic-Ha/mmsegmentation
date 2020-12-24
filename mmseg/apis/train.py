@@ -50,6 +50,7 @@ def train_segmentor(model,
             len(cfg.gpu_ids),
             dist=distributed,
             seed=cfg.seed,
+            # shuffle=False,
             drop_last=True) for ds in dataset
     ]
 

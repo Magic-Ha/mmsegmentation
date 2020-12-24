@@ -1,14 +1,13 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from mmcv.cnn import ConvModule
 from mmcv.runner import force_fp32
 
 from mmseg.ops import resize
 from ..builder import HEADS
-# from ..losses import accuracy, accuracy_error_loss
-from ..losses import accuracy, accuracy_error_loss, accuracy_ce_error_loss
+from ..losses import accuracy, accuracy_error_loss
+# from ..losses import accuracy, accuracy_error_loss, accuracy_ce_error_loss
 
 from .decode_head import BaseDecodeHead
 
@@ -96,20 +95,6 @@ class PSPHead(BaseDecodeHead):
             norm_cfg=self.norm_cfg,
             act_cfg=self.act_cfg)
 
-    def ata_loss(self, filters, target, num_class, batch_size):
-        target_b = target.view(batch_size, -1)
-        lb_shown = [torch.unique(target_b[bi], sorted=True).long() for bi in range(0, batch_size)]
-        for i in range(0, batch_size):
-            if lb_shown[i].max()==255:
-                lb_shown[i] = lb_shown[i][0:lb_shown[i].shape[0]-1]
-        ata_mask = 1. - torch.eye(num_class).to('cuda')
-        # filters = F.normalize(filters, p=2, dim=1)
-        dist_matrix = [torch.mm(filters.view(batch_size, num_class, -1)[bi],
-                                filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-
-        cosdist = torch.cat([dist_matrix[bi].mean().unsqueeze(0) for bi in range(0, batch_size)], dim=0)
-        return 10*cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
-
     def forward(self, inputs):
         """Forward function."""
         x = self._transform_inputs(inputs)
@@ -120,35 +105,6 @@ class PSPHead(BaseDecodeHead):
         output = self.cls_seg(output)
         return output
 
-    @force_fp32(apply_to=('seg_logit', 'extra_loss'))
-    def losses(self, seg_logit, seg_label, error_map=None):
-        """Compute segmentation loss."""
-
-        loss = dict()
-        seg_logit = resize(
-            input=seg_logit,
-            size=(seg_label.shape[2:]),
-            mode='bilinear',
-            align_corners=(self.align_corners))
-        if self.sampler is not None:
-            seg_weight = self.sampler.sample(seg_logit, seg_label)
-        else:
-            seg_weight = None
-        seg_label = seg_label.squeeze(1)
-        loss['loss_seg'] = self.loss_decode(
-            seg_logit,
-            seg_label,
-            weight=seg_weight,
-            ignore_index=(self.ignore_index))
-        loss['acc_seg'] = accuracy(seg_logit, seg_label)
-        # loss['acc_pre_seg'] = accuracy(pre_seg_logit, seg_label)
-        loss['loss_ata'] = self.ata_loss()
-        return loss
-
-    def forward_train(self, inputs, img_metas, gt_semantic_seg, train_cfg, img):
-        seg_logits = self.forward(inputs)
-        losses = self.losses(seg_logits, gt_semantic_seg)
-        return losses
 
 @HEADS.register_module()
 class DDPSPHead(PSPHead):
@@ -699,21 +655,15 @@ class EDPSPHead(PSPHead):
         """
         return self.forward(inputs)
 
+
 @HEADS.register_module()
 class ED_CE_PSPHead(PSPHead):
 
     def __init__(self, pool_scales=(1, 2, 3, 6), **kwargs):
         self.weight_mode = kwargs.pop('weight_mode')
-        
-        # self.finput_fusion_mode = kwargs.pop('finput_fusion_mode')
         self.sum_weight = kwargs.pop('sum_weight')
         self.with_bias = kwargs.pop('with_bias')
         self.with_error_ds = kwargs.pop("with_error_ds")
-        fe_input_cast = {'res_stage1': [0, 256, 128],
-                         'res_stage2': [1, 512, 64],
-                         'res_stage3': [2, 1024, 64],
-                         'res_stage4': [3, 2048, 64]}
-        self.fe_input_config = fe_input_cast[kwargs.pop('fe_input')]
         (super(ED_CE_PSPHead, self).__init__)(**kwargs)
         self.freeze_parameters()
         assert isinstance(pool_scales, (list, tuple))
@@ -736,21 +686,18 @@ class ED_CE_PSPHead(PSPHead):
             self.fb_compact = nn.Sequential(
                 nn.Conv2d(2048, self.num_classes, kernel_size=3, padding=1),
                 nn.LeakyReLU(inplace=True))
-
             self.generator_b = nn.Conv2d(
                 (2 * self.num_classes),
                 self.dsb_num,
                 kernel_size=1,
                 groups=self.num_classes)
         if self.with_error_ds:
-            # self.fe_compact = nn.Sequential(
-            #     nn.Conv2d(2048, self.num_classes, kernel_size=3, padding=1),
-            #     nn.LeakyReLU(inplace=True))
             self.fe_compact = nn.Sequential(
-                nn.Conv2d(self.fe_input_config[1], self.num_classes, kernel_size=3, padding=1),
+                nn.Conv2d(2048, self.num_classes, kernel_size=3, padding=1),
                 nn.LeakyReLU(inplace=True))
+
             self.error_ds = nn.Conv2d(self.num_classes*2, 2, kernel_size=1, padding=0)
-            self.softmax = torch.nn.LogSoftmax(dim=1)
+            self.softmax = torch.nn.LogSoftmax(dim = 1)
             # error_ds的输入是coarse_prediction与backbone来的feature(还要考虑位置)
 
     def freeze_parameters(self):
@@ -783,18 +730,7 @@ class ED_CE_PSPHead(PSPHead):
             f = self.f_compact(x.detach())
             # if mode == 'stage2':
             #     f.retain_grad()
-            # TODO: 这里以后要弄一个加和拼接的对比操作
-            # if self.finput_fusion_mode == 'sum':
-            #     m = coarse_output + 
-
-            # m = torch.cat([coarse_output[:,0,:,:].unsqueeze(1), f[:,0,:,:].unsqueeze(1)], dim=1)
-            # for i in range(1,self.num_classes):
-            #     m = torch.cat([m, torch.cat([coarse_output[:,i,:,:].unsqueeze(1),f[:,i,:,:].unsqueeze(1)],dim=1)],dim=1)
-            
-            # FIXME: 这地方是应该用m的直接这样拼起来然后做分组卷积其实就不是对应的了 是一部分用的cp 一部分用的f
-            # 这明显不合理,这地方应该要重新做实验了
             delta_p = self.generator_w(torch.cat([coarse_output, f], dim=1))
-            # delta_p = self.generator_w(m)
             # delta_p.retain_grad()
             delta_p = nn.functional.adaptive_avg_pool2d(delta_p, (1, 1))
             delta_p = delta_p.view(batch_size, self.num_classes, -1, 1, 1)
@@ -838,26 +774,13 @@ class ED_CE_PSPHead(PSPHead):
                                           new_bias, groups=batch_size)
             output = output.view(coarse_output.size())
             if self.with_error_ds:
-                fe = self.fe_compact(inputs[self.fe_input_config[0]])
-                if coarse_output.shape[2:] != fe.shape[2:]:
-                    coarse_output = resize(
-                        input=coarse_output,
-                        size=(fe.shape[2:]),
-                        mode='bilinear',
-                        align_corners=(self.align_corners))
+                fe = self.fe_compact(x.detach())
                 error_map = self.error_ds(torch.cat([coarse_output, fe],
                                                     dim=1))
                 if mode != 'test':
                     error_map.retain_grad()
                 # error_logit = torch.sigmoid(error_map)
                 # error_logit = torch.sigmoid(error_map.clone().detach())
-
-                if output.shape[2:] != error_map.shape[2:]:
-                    output = resize(
-                        input=output,
-                        size=(error_map.shape[2:]),
-                        mode='bilinear',
-                        align_corners=(self.align_corners))
                 # FIXME:这里detach掉了 记得改回来啊
                 # error_logit = self.softmax(error_map.clone().detach())
                 error_logit = self.softmax(error_map)
@@ -872,8 +795,7 @@ class ED_CE_PSPHead(PSPHead):
 
             if mode == 'stage2' or mode == 'stage3':
                 if self.with_error_ds:
-                    return (output, coarse_output, error_logit)
-                    # return (output, coarse_output, error_map)
+                    return (output, coarse_output, error_map)
                     # return (output, coarse_output)
                 else:
                     return (output, coarse_output)
@@ -929,13 +851,14 @@ class ED_CE_PSPHead(PSPHead):
             ignore_index=(self.ignore_index))
         loss['acc_seg'] = accuracy(seg_logit, seg_label)
         loss['acc_seg_coarse'] = accuracy(coarse_logit, seg_label)
-        if self.with_error_ds:
-            loss['error_loss_seg'], loss['acc_error_pred'] = accuracy_ce_error_loss(coarse_logit,
-                                                            seg_label,
-                                                            error_logit)
-        #     #print(s==loss['acc_seg_coarse'])
-        #     # loss['error_loss_seg'] *= 10
-        #     # loss['acc_error_pred'] = self.eds_correct_rate
+        # FIXME:记得要改回来把loss加上
+        # if self.with_error_ds:
+        #     loss['error_loss_seg'], loss['acc_error_pred'] = accuracy_ce_error_loss(coarse_logit,
+        #                                                     seg_label,
+        #                                                     error_logit)
+            #print(s==loss['acc_seg_coarse'])
+            # loss['error_loss_seg'] *= 10
+            # loss['acc_error_pred'] = self.eds_correct_rate
 
         return loss
 
@@ -959,246 +882,4 @@ class ED_CE_PSPHead(PSPHead):
         return losses
 
     def forward_test(self, inputs, img_metas, test_cfg):
-        return self.forward(inputs)
-
-
-class ConditionalFilterLayer(nn.Module):
-    def __init__(self, ichn, ochn):
-        super(ConditionalFilterLayer, self).__init__()
-        self.ichn = ichn
-        self.ochn = ochn
-        self.mask_conv = nn.Conv2d(ichn, ochn, kernel_size=1)
-        self.filter_conv = nn.Conv2d(ochn * ichn, ochn * ichn, kernel_size=1,
-                                     groups=ochn)
-        self.filter_convloop = nn.Conv2d(ochn * ichn, ochn * ichn, kernel_size=1,
-                                     groups=ochn)
-    def multi_class_dice_loss(self, mask, target, num_class):
-        target = torch.where(target==255,torch.full_like(target, 0), target)
-        target = F.one_hot(target.long(), num_class + 1)[:, :, :, 1:]
-        # print(target.size())
-        target = target.permute(0, 3, 1, 2)
-        mask = mask.contiguous().view(mask.size()[0], num_class, -1)
-        target = target.contiguous().view(target.size()[0], num_class,
-                                          -1).float()
-
-        a = torch.sum(mask * target, 2)
-        b = torch.sum(mask * mask, 2) + 0.00001
-        # b = torch.sum(mask * mask, 2) + 0.001
-        c = torch.sum(target * target, 2) + 0.00001
-        # c = torch.sum(target * target, 2) + 0.001
-        d = (2 * a) / (b + c)
-        # return (1 - d).mean()
-        return (1 - d).mean()
-
-    def ata_loss(self, filters, target, num_class, batch_size):
-        target_b = target.view(batch_size, -1)
-        lb_shown = [torch.unique(target_b[bi], sorted=True).long() for bi in range(0, batch_size)]
-        for i in range(0, batch_size):
-            if lb_shown[i].max()==255:
-                lb_shown[i] = lb_shown[i][0:lb_shown[i].shape[0]-1]
-        # label_onehot = torch.sign(label_bin)
-        ata_mask = 1. - torch.eye(num_class).to('cuda')
-        # ZHE GE BU YAO SHAN
-        # batch_mask = torch.zeros_like(ata_mask).to('cuda')
-        # bml = [batch_mask.index_fill(0, lb_shown[bi].squeeze(), 1) for bi in range(0, batch_size)]
-        # # bmlc = [ata_mask.mul(bml[bi]).mul(bml[bi].T) for bi in range(0, batch_size)]
-        # bmlc = [ata_mask.mul(bml[bi]) for bi in range(0, batch_size)]
-
-        # filters = F.normalize(filters, p=2, dim=1)
-        dist_matrix = [torch.mm(filters.view(batch_size, num_class, -1)[bi],
-                                # filters.view(batch_size, num_class, -1)[bi].T).abs().mul(bmlc[bi]) for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).abs(), bmlc[bi].bool()) for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).abs().mul(bmlc[bi]) for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T)/2.).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T)/2.).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]][:,lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask)[lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(bmlc[bi]) for bi in range(0, batch_size)]
-        
-        cosdist = torch.cat([dist_matrix[bi].mean().unsqueeze(0) for bi in range(0, batch_size)], dim=0)
-        # cosdist = torch.cat([dist_matrix[bi].sum().unsqueeze(0) for bi in range(0, batch_size)], dim=0)
-
-        # return cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
-        return 10*cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
-
-    def cfloop(self, filter_conv, feat, mask, x, b, k, h, w, delta_mode=False):
-        class_feat = torch.bmm(mask, feat) / (h * w)
-        class_feat = class_feat.view(b, k * self.ichn, 1, 1)
-        filters = filter_conv(class_feat)
-        filters = filters.view(b * k, self.ichn, 1, 1)
-        if delta_mode:
-            pred = F.conv2d(x, filters+self.mask_conv.weight.repeat([b,1,1,1]).clone().detach(), groups=b).view(b, k, h, w)
-            # pred = pred + pre_mask.clone().detach()
-            # print(delta_mode)
-        else:
-            pred = F.conv2d(x, filters, groups=b).view(b, k, h, w)
-        return filters, pred
-
-    def forward(self, x, gt=None, num_class=None, delta_mode=False, dpm=None):
-        flag = True
-        feat = x
-        pre_mask = self.mask_conv(x)
-        mask = torch.sigmoid(pre_mask)
-        # mask = torch.sigmoid(self.mask_conv(x))
-
-        if gt is not None:
-            dice_loss = self.multi_class_dice_loss(mask, gt, num_class)
-
-        # b k h w
-        b, k, h, w = mask.size()
-        mask = mask.view(b, k, -1)
-
-        feat = feat.view(b, self.ichn, -1)
-        feat = feat.permute(0, 2, 1)
-        x = x.view(-1, h, w).unsqueeze(0)
-        # b, k, ichn
-        # class_feat = torch.bmm(mask, feat) / (h * w)
-        # class_feat = class_feat.view(b, k * self.ichn, 1, 1)
-
-        # # b, k*ichn, 1, 1
-        # filters = self.filter_conv(class_feat)
-        # filters = filters.view(b * k, self.ichn, 1, 1)
-        if dpm is not None:
-            feat = dpm(feat)
-        filters, pred = self.cfloop(self.filter_conv, feat, mask, x, b, k, h, w, delta_mode)
-        # if gt is not None:
-        #     loop_dice_loss = self.multi_class_dice_loss(pred, gt, num_class)
-        # # filters2, pred2 = self.cfloop(self.filter_conv, feat, pred.view(b, k, -1), x, b, k, h, w, delta_mode)
-        # filters2, pred2 = self.cfloop(self.filter_convloop, feat, pred.view(b, k, -1), x, b, k, h, w, delta_mode)
-
-        if gt is not None:
-            # filters
-            # cosdist, dist_matrix = self.ata_loss(filters+self.mask_conv.weight.repeat([b,1,1,1]).clone().detach(), gt, num_class, b)
-            cosdist, dist_matrix = self.ata_loss(filters, gt, num_class, b)
-            # loop_cosdist, loop_dist_matrix = self.ata_loss(filters2, gt, num_class, b)
-            # cpcosdist, cp_dist_matrix = self.ata_loss(self.mask_conv.weight.repeat([b,1,1,1]), gt, num_class, b)
-
-            # return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist,
-            return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist,
-                        #    'loss_cpcosdist': cpcosdist, 'pre_mask': pre_mask}
-                           'pre_mask': pre_mask}
-            # return pred2, {'loss_CFlayer': dice_loss,'loss_loop_CFlayer': loop_dice_loss, 'loss_cosdist': cosdist,
-            # return pred2, {'loss_CFlayer': dice_loss,'loss_loop_CFlayer': loop_dice_loss, 'loss_cosdist': loop_cosdist,
-            #             #    'loss_cpcosdist': cpcosdist, 'pre_mask': pre_mask}
-            #                 'pre_mask': pred}
-            # return pred, {'loss_CFlayer': dice_loss}
-            # return pred, mask
-        return pred
-        # return pred2
-
-@HEADS.register_module()
-class CFPSPHead(PSPHead):
-
-    def __init__(self, pool_scales=(1, 2, 3, 6), **kwargs):
-        self.delta_mode = kwargs.pop('delta_mode')
-        print("self.delta_mode = ",self.delta_mode)
-        self.same_cfloss = kwargs.pop('same_loss')
-        super(CFPSPHead, self).__init__(**kwargs)
-        self.cf_layer = ConditionalFilterLayer(512, self.num_classes)
-
-    def forward(self, inputs, label=None):
-        """Forward function."""
-        x = self._transform_inputs(inputs)
-        psp_outs = [x]
-        psp_outs.extend(self.psp_modules(x))
-        psp_outs = torch.cat(psp_outs, dim=1)
-        output = self.bottleneck(psp_outs)
-        # output = self.cls_seg(output)
-        if label is not None:
-            b, useless, h, w = label.size()
-            aux_label = F.interpolate((label.view(b, 1, h, w)).float(),
-                                      scale_factor=0.125,
-                                      mode="nearest")
-            aux_label = aux_label.view(b, h // 8, w // 8)
-        else:
-            aux_label = None
-        if self.dropout is not None:
-            dpm = self.dropout
-        final_output = self.cf_layer(output, aux_label, self.num_classes, self.delta_mode)
-        if label is not None:
-            fm = final_output[0]
-            dice_loss = final_output[1]
-            return fm, dice_loss
-        else:
-            fm = final_output
-            return fm
-
-        # if self.delta_mode:
-        #     fm = fm + output
-        # return fm
-
-    @force_fp32(apply_to=('seg_logit', 'extra_loss'))
-    def losses(self, seg_logit, extra_loss, seg_label, error_map=None):
-        """Compute segmentation loss."""
-        loss = dict()
-        pre_seg_logit = resize(
-            input=extra_loss.pop('pre_mask'),
-            size=(seg_label.shape[2:]),
-            mode='bilinear',
-            align_corners=(self.align_corners))
-        seg_logit = resize(
-            input=seg_logit,
-            size=(seg_label.shape[2:]),
-            mode='bilinear',
-            align_corners=(self.align_corners))
-        # if coarse_logit.shape[2:] != seg_label.shape[2:]:
-        #     coarse_logit = resize(
-        #         input=coarse_logit,
-        #         size=(seg_label.shape[2:]),
-        #         mode='bilinear',
-        #         align_corners=(self.align_corners))
-        ############################################
-        # if self.with_error_ds:
-        #     error_logit = resize(
-        #         input=error_map,
-        #         size=(seg_label.shape[2:]),
-        #         mode='bilinear',
-        #         align_corners=(self.align_corners))
-        ##############################################
-        if self.sampler is not None:
-            seg_weight = self.sampler.sample(seg_logit, seg_label)
-            # coarse_seg_weight = self.sampler.sample(coarse_logit, seg_label)
-        else:
-            seg_weight = None
-            # coarse_seg_weight = None
-        seg_label = seg_label.squeeze(1)
-        loss['loss_seg'] = self.loss_decode(
-            seg_logit,
-            seg_label,
-            weight=seg_weight,
-            ignore_index=(self.ignore_index))
-        # loss['loss_preloop_seg'] = self.loss_decode(
-        #     pre_seg_logit,
-        #     seg_label,
-        #     weight=seg_weight,
-        #     ignore_index=(self.ignore_index))
-        # loss['coarse_loss_seg'] = self.loss_decode(
-        #     coarse_logit,
-        #     seg_label,
-        #     weight=coarse_seg_weight,
-        #     ignore_index=(self.ignore_index))
-        loss['acc_seg'] = accuracy(seg_logit, seg_label)
-        loss['acc_pre_seg'] = accuracy(pre_seg_logit, seg_label)
-
-        loss.update(extra_loss)
-
-        # loss['loss_dice'] = 0.4 * extra_loss[0]
-        # loss['loss_cos_dist'] = 0.5 * extra_loss[1]
-        return loss
-        # loss['acc_seg_coarse'] = accuracy(coarse_logit, seg_label)
-        # if self.with_error_ds:
-        #     loss['error_loss_seg'], loss['acc_error_pred'] = accuracy_ce_error_loss(coarse_logit,
-        #                                                     seg_label,
-        #                                                     error_logit)
-        # #     #print(s==loss['acc_seg_coarse'])
-        # #     # loss['error_loss_seg'] *= 10
-        # #     # loss['acc_error_pred'] = self.eds_correct_rate
-
-    def forward_train(self, inputs, img_metas, gt_semantic_seg, train_cfg, img):
-        seg_logits, dice_loss = self.forward(inputs,  label=gt_semantic_seg)
-        losses = self.losses(seg_logits, dice_loss, gt_semantic_seg)
-        return losses
-
-    def forward_test(self, inputs, img_metas, test_cfg, **kwargs):
         return self.forward(inputs)

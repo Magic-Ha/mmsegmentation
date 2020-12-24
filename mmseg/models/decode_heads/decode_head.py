@@ -166,7 +166,7 @@ class BaseDecodeHead(nn.Module, metaclass=ABCMeta):
         """Placeholder of forward function."""
         pass
 
-    def forward_train(self, inputs, img_metas, gt_semantic_seg, train_cfg):
+    def forward_train(self, inputs, img_metas, gt_semantic_seg, train_cfg, img=None):
         """Forward function for training.
         Args:
             inputs (list[Tensor]): List of multi-level img features.

@@ -96,20 +96,6 @@ class PSPHead(BaseDecodeHead):
             norm_cfg=self.norm_cfg,
             act_cfg=self.act_cfg)
 
-    def ata_loss(self, filters, target, num_class, batch_size):
-        target_b = target.view(batch_size, -1)
-        lb_shown = [torch.unique(target_b[bi], sorted=True).long() for bi in range(0, batch_size)]
-        for i in range(0, batch_size):
-            if lb_shown[i].max()==255:
-                lb_shown[i] = lb_shown[i][0:lb_shown[i].shape[0]-1]
-        ata_mask = 1. - torch.eye(num_class).to('cuda')
-        # filters = F.normalize(filters, p=2, dim=1)
-        dist_matrix = [torch.mm(filters.view(batch_size, num_class, -1)[bi],
-                                filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-
-        cosdist = torch.cat([dist_matrix[bi].mean().unsqueeze(0) for bi in range(0, batch_size)], dim=0)
-        return 10*cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
-
     def forward(self, inputs):
         """Forward function."""
         x = self._transform_inputs(inputs)
@@ -120,35 +106,6 @@ class PSPHead(BaseDecodeHead):
         output = self.cls_seg(output)
         return output
 
-    @force_fp32(apply_to=('seg_logit', 'extra_loss'))
-    def losses(self, seg_logit, seg_label, error_map=None):
-        """Compute segmentation loss."""
-
-        loss = dict()
-        seg_logit = resize(
-            input=seg_logit,
-            size=(seg_label.shape[2:]),
-            mode='bilinear',
-            align_corners=(self.align_corners))
-        if self.sampler is not None:
-            seg_weight = self.sampler.sample(seg_logit, seg_label)
-        else:
-            seg_weight = None
-        seg_label = seg_label.squeeze(1)
-        loss['loss_seg'] = self.loss_decode(
-            seg_logit,
-            seg_label,
-            weight=seg_weight,
-            ignore_index=(self.ignore_index))
-        loss['acc_seg'] = accuracy(seg_logit, seg_label)
-        # loss['acc_pre_seg'] = accuracy(pre_seg_logit, seg_label)
-        loss['loss_ata'] = self.ata_loss()
-        return loss
-
-    def forward_train(self, inputs, img_metas, gt_semantic_seg, train_cfg, img):
-        seg_logits = self.forward(inputs)
-        losses = self.losses(seg_logits, gt_semantic_seg)
-        return losses
 
 @HEADS.register_module()
 class DDPSPHead(PSPHead):
@@ -970,8 +927,7 @@ class ConditionalFilterLayer(nn.Module):
         self.mask_conv = nn.Conv2d(ichn, ochn, kernel_size=1)
         self.filter_conv = nn.Conv2d(ochn * ichn, ochn * ichn, kernel_size=1,
                                      groups=ochn)
-        self.filter_convloop = nn.Conv2d(ochn * ichn, ochn * ichn, kernel_size=1,
-                                     groups=ochn)
+
     def multi_class_dice_loss(self, mask, target, num_class):
         target = torch.where(target==255,torch.full_like(target, 0), target)
         target = F.one_hot(target.long(), num_class + 1)[:, :, :, 1:]
@@ -982,12 +938,9 @@ class ConditionalFilterLayer(nn.Module):
                                           -1).float()
 
         a = torch.sum(mask * target, 2)
-        b = torch.sum(mask * mask, 2) + 0.00001
-        # b = torch.sum(mask * mask, 2) + 0.001
-        c = torch.sum(target * target, 2) + 0.00001
-        # c = torch.sum(target * target, 2) + 0.001
+        b = torch.sum(mask * mask, 2) + 0.001
+        c = torch.sum(target * target, 2) + 0.001
         d = (2 * a) / (b + c)
-        # return (1 - d).mean()
         return (1 - d).mean()
 
     def ata_loss(self, filters, target, num_class, batch_size):
@@ -998,11 +951,23 @@ class ConditionalFilterLayer(nn.Module):
                 lb_shown[i] = lb_shown[i][0:lb_shown[i].shape[0]-1]
         # label_onehot = torch.sign(label_bin)
         ata_mask = 1. - torch.eye(num_class).to('cuda')
-        # ZHE GE BU YAO SHAN
-        # batch_mask = torch.zeros_like(ata_mask).to('cuda')
-        # bml = [batch_mask.index_fill(0, lb_shown[bi].squeeze(), 1) for bi in range(0, batch_size)]
-        # # bmlc = [ata_mask.mul(bml[bi]).mul(bml[bi].T) for bi in range(0, batch_size)]
-        # bmlc = [ata_mask.mul(bml[bi]) for bi in range(0, batch_size)]
+        batch_mask = torch.zeros_like(ata_mask).to('cuda')
+        bml = [batch_mask.index_fill(0, lb_shown[bi].squeeze(), 1) for bi in range(0, batch_size)]
+        # bmlc = [ata_mask.mul(bml[bi]).mul(bml[bi].T) for bi in range(0, batch_size)]
+        bmlc = [ata_mask.mul(bml[bi]) for bi in range(0, batch_size)]
+        # [batch_mask.index_fill(0, label_bin[bi], 1), for bi in range(0, batch_size)]
+        # dist_matrix = [torch.masked_select(torch.mm(filters.view(batch_size, num_class, -1)[bi],
+        # dist_matrix = [torch.masked_select(torch.mm(filters.view(batch_size, num_class, -1)[bi],
+
+        # dist_matrix = [(torch.mm(filters.view(batch_size, num_class, -1)[bi],
+        #                         # filters.view(batch_size, num_class, -1)[bi].T).abs().mul(bmlc[bi]) for bi in range(0, batch_size)]
+        #                         # filters.view(batch_size, num_class, -1)[bi].T).abs(), bmlc[bi].bool()) for bi in range(0, batch_size)]
+        #                         # filters.view(batch_size, num_class, -1)[bi].T).abs().mul(bmlc[bi]) for bi in range(0, batch_size)]
+        #                         filters.view(batch_size, num_class, -1)[bi].T)/2.).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
+        #                         # filters.view(batch_size, num_class, -1)[bi].T).mul(bmlc[bi]) for bi in range(0, batch_size)]
+        # # for i in range(0,batch_size):
+        # #     assert not bool((torch.isnan(dist_matrix[i]).sum()>0).cpu())
+        # dist_matrix_mean = [dist_matrix[bi].mean(dim=0) for bi in range(0, batch_size)]
 
         # filters = F.normalize(filters, p=2, dim=1)
         dist_matrix = [torch.mm(filters.view(batch_size, num_class, -1)[bi],
@@ -1011,31 +976,38 @@ class ConditionalFilterLayer(nn.Module):
                                 # filters.view(batch_size, num_class, -1)[bi].T).abs().mul(bmlc[bi]) for bi in range(0, batch_size)]
                                 # filters.view(batch_size, num_class, -1)[bi].T)/2.).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
                                 # filters.view(batch_size, num_class, -1)[bi].T)/2.).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]][:,lb_shown[bi]] for bi in range(0, batch_size)]
+                                # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
+                                #之前一直用这个filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
+                                filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]][:,lb_shown[bi]] for bi in range(0, batch_size)]
                                 # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask)[lb_shown[bi]] for bi in range(0, batch_size)]
                                 # filters.view(batch_size, num_class, -1)[bi].T).mul(bmlc[bi]) for bi in range(0, batch_size)]
         
+        # print(dist_matrix[0])
+        # print(dist_matrix[0].shape)
+        # print(dist_matrix[1].shape)
+        # print(dist_matrix[2].shape)
+        # print(dist_matrix[3].shape)
+        # print(dist_matrix)
+        # for i in range(0,batch_size):
+        #     assert not bool((torch.isnan(dist_matrix_mean[i]).sum()>0).cpu())
         cosdist = torch.cat([dist_matrix[bi].mean().unsqueeze(0) for bi in range(0, batch_size)], dim=0)
-        # cosdist = torch.cat([dist_matrix[bi].sum().unsqueeze(0) for bi in range(0, batch_size)], dim=0)
-
-        # return cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
+        # cosdist = torch.cat([dist_matrix[bi].unsqueeze(0) for bi in range(0, batch_size)], dim=0).sum(0)
+        # print(cosdist)
+        # print(cosdist.shape)
+        # if cosdist>=2.0:
+        #     print("error")
+        # cosdist = [dist_matrix[bi].mean() for bi in range(0, batch_size)]
+        # print(cosdist)
+        # return cosdist.mean(), dist_matrix
+        # if cosdist.mean()>0.5:
+            # print("dayu 0.5 ")
+        # assert not bool((torch.isnan(cosdist).sum()>0).cpu())
+        # assert not bool(torch.isnan(cosdist.mean()).cpu())
+        # assert not bool(torch.isnan(cosdist[~torch.isnan(cosdist)]).sum().cpu()>0)
+        
         return 10*cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
 
-    def cfloop(self, filter_conv, feat, mask, x, b, k, h, w, delta_mode=False):
-        class_feat = torch.bmm(mask, feat) / (h * w)
-        class_feat = class_feat.view(b, k * self.ichn, 1, 1)
-        filters = filter_conv(class_feat)
-        filters = filters.view(b * k, self.ichn, 1, 1)
-        if delta_mode:
-            pred = F.conv2d(x, filters+self.mask_conv.weight.repeat([b,1,1,1]).clone().detach(), groups=b).view(b, k, h, w)
-            # pred = pred + pre_mask.clone().detach()
-            # print(delta_mode)
-        else:
-            pred = F.conv2d(x, filters, groups=b).view(b, k, h, w)
-        return filters, pred
-
-    def forward(self, x, gt=None, num_class=None, delta_mode=False, dpm=None):
+    def forward(self, x, gt=None, num_class=None, delta_mode=False):
         flag = True
         feat = x
         pre_mask = self.mask_conv(x)
@@ -1051,48 +1023,39 @@ class ConditionalFilterLayer(nn.Module):
 
         feat = feat.view(b, self.ichn, -1)
         feat = feat.permute(0, 2, 1)
-        x = x.view(-1, h, w).unsqueeze(0)
         # b, k, ichn
-        # class_feat = torch.bmm(mask, feat) / (h * w)
-        # class_feat = class_feat.view(b, k * self.ichn, 1, 1)
+        class_feat = torch.bmm(mask, feat) / (h * w)
+        class_feat = class_feat.view(b, k * self.ichn, 1, 1)
 
-        # # b, k*ichn, 1, 1
-        # filters = self.filter_conv(class_feat)
-        # filters = filters.view(b * k, self.ichn, 1, 1)
-        if dpm is not None:
-            feat = dpm(feat)
-        filters, pred = self.cfloop(self.filter_conv, feat, mask, x, b, k, h, w, delta_mode)
-        # if gt is not None:
-        #     loop_dice_loss = self.multi_class_dice_loss(pred, gt, num_class)
-        # # filters2, pred2 = self.cfloop(self.filter_conv, feat, pred.view(b, k, -1), x, b, k, h, w, delta_mode)
-        # filters2, pred2 = self.cfloop(self.filter_convloop, feat, pred.view(b, k, -1), x, b, k, h, w, delta_mode)
+        # b, k*ichn, 1, 1
+        filters = self.filter_conv(class_feat)
+        filters = filters.view(b * k, self.ichn, 1, 1)
+
+        x = x.view(-1, h, w).unsqueeze(0)
+        if delta_mode:
+            pred = F.conv2d(x, filters+self.mask_conv.weight.repeat([b,1,1,1]).clone().detach(), groups=b).view(b, k, h, w)
+            # pred = pred + pre_mask.clone().detach()
+            # print(delta_mode)
+        else:
+            pred = F.conv2d(x, filters, groups=b).view(b, k, h, w)
 
         if gt is not None:
             # filters
             # cosdist, dist_matrix = self.ata_loss(filters+self.mask_conv.weight.repeat([b,1,1,1]).clone().detach(), gt, num_class, b)
             cosdist, dist_matrix = self.ata_loss(filters, gt, num_class, b)
-            # loop_cosdist, loop_dist_matrix = self.ata_loss(filters2, gt, num_class, b)
             # cpcosdist, cp_dist_matrix = self.ata_loss(self.mask_conv.weight.repeat([b,1,1,1]), gt, num_class, b)
-
+            # print(cosdist)
             # return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist,
-            return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist,
-                        #    'loss_cpcosdist': cpcosdist, 'pre_mask': pre_mask}
-                           'pre_mask': pre_mask}
-            # return pred2, {'loss_CFlayer': dice_loss,'loss_loop_CFlayer': loop_dice_loss, 'loss_cosdist': cosdist,
-            # return pred2, {'loss_CFlayer': dice_loss,'loss_loop_CFlayer': loop_dice_loss, 'loss_cosdist': loop_cosdist,
-            #             #    'loss_cpcosdist': cpcosdist, 'pre_mask': pre_mask}
-            #                 'pre_mask': pred}
+            return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
             # return pred, {'loss_CFlayer': dice_loss}
             # return pred, mask
         return pred
-        # return pred2
 
 @HEADS.register_module()
 class CFPSPHead(PSPHead):
 
     def __init__(self, pool_scales=(1, 2, 3, 6), **kwargs):
         self.delta_mode = kwargs.pop('delta_mode')
-        print("self.delta_mode = ",self.delta_mode)
         self.same_cfloss = kwargs.pop('same_loss')
         super(CFPSPHead, self).__init__(**kwargs)
         self.cf_layer = ConditionalFilterLayer(512, self.num_classes)
@@ -1113,8 +1076,6 @@ class CFPSPHead(PSPHead):
             aux_label = aux_label.view(b, h // 8, w // 8)
         else:
             aux_label = None
-        if self.dropout is not None:
-            dpm = self.dropout
         final_output = self.cf_layer(output, aux_label, self.num_classes, self.delta_mode)
         if label is not None:
             fm = final_output[0]
@@ -1168,7 +1129,7 @@ class CFPSPHead(PSPHead):
             seg_label,
             weight=seg_weight,
             ignore_index=(self.ignore_index))
-        # loss['loss_preloop_seg'] = self.loss_decode(
+        # loss['scores_pre_seg'] = 0.4*self.loss_decode(
         #     pre_seg_logit,
         #     seg_label,
         #     weight=seg_weight,

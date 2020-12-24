@@ -28,7 +28,8 @@ class FCNHead(BaseDecodeHead):
         self.num_convs = num_convs
         self.concat_input = concat_input
         self.kernel_size = kernel_size
-        self.freeze_all = kwargs.pop('freeze_all')
+        # if hasattr(kwargs,'freeze_all'):
+        #     self.freeze_all = kwargs.pop('freeze_all')
         super(FCNHead, self).__init__(**kwargs)
         convs = []
         convs.append(
@@ -60,7 +61,7 @@ class FCNHead(BaseDecodeHead):
                 conv_cfg=self.conv_cfg,
                 norm_cfg=self.norm_cfg,
                 act_cfg=self.act_cfg)
-        self.freeze()
+        # self.freeze()
 
     def forward(self, inputs):
         """Forward function."""
@@ -72,5 +73,6 @@ class FCNHead(BaseDecodeHead):
         return output
 
     def freeze(self):
-        if self.freeze_all:
-            self.requires_grad_(False)
+        if hasattr(self, 'freeze_all'):
+            if self.freeze_all:
+                self.requires_grad_(False)

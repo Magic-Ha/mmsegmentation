@@ -206,7 +206,10 @@ class CustomDataset(Dataset):
         """
 
         img_info = self.img_infos[idx]
-        results = dict(img_info=img_info)
+        ann_info = self.get_ann_info(idx)
+        # FIXME: 这里是test的时候也能有img的关键
+        results = dict(img_info=img_info, ann_info=ann_info)
+        # results = dict(img_info=img_info)
         self.pre_pipeline(results)
         return self.pipeline(results)
 
