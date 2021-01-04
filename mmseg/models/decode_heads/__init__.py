@@ -13,12 +13,12 @@ from .psp_head import DDPSPHead, PSPHead, EDPSPHead, ED_CE_PSPHead
 # # from .psp_head import 
 # from .edpsp_head import EDPSPHead
 
-from .sep_aspp_head import DepthwiseSeparableASPPHead
+from .sep_aspp_head import DepthwiseSeparableASPPHead, CFDSASPPHead
 from .sep_fcn_head import DepthwiseSeparableFCNHead
 from .uper_head import UPerHead
 
 __all__ = [
     'FCNHead', 'PSPHead', 'ASPPHead', 'PSAHead', 'NLHead', 'GCHead', 'CCHead',
-    'UPerHead', 'DepthwiseSeparableASPPHead', 'ANNHead', 'DAHead', 'OCRHead',
+    'UPerHead', 'DepthwiseSeparableASPPHead', 'CFDSASPPHead', 'ANNHead', 'DAHead', 'OCRHead',
     'EncHead', 'DepthwiseSeparableFCNHead', 'FPNHead', 'DDPSPHead', 'EDPSPHead', 'ED_CE_PSPHead'
 ]
