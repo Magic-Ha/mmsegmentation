@@ -26,7 +26,7 @@ model = dict(
         # softmax_mask=False,
         softmax_mask=False,
         topk_filter=None,
-        intra_weight=0.4,
+        intra_weight=0.2,
 
         dropout_ratio=0.1,
         num_classes=150,

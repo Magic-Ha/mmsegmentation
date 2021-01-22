@@ -14,6 +14,7 @@ from .psp_head import DDPSPHead, PSPHead, EDPSPHead, ED_CE_PSPHead
 # from .edpsp_head import EDPSPHead
 
 from .sep_aspp_head import DepthwiseSeparableASPPHead, CFDSASPPHead
+# from .sep_aspp_head_laplas_modified_gaihuiqude import MAXCFDSASPPHead
 from .sep_fcn_head import DepthwiseSeparableFCNHead
 from .uper_head import UPerHead
 

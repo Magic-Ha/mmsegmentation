@@ -166,6 +166,7 @@ class DepthwiseSeparableASPPHead(ASPPHead):
     def forward_test(self, inputs, img_metas, test_cfg, **kwargs):
         return self.forward(inputs)
 
+
 class ConditionalFilterLayer(nn.Module):
     def __init__(self, ichn, ochn):
         super(ConditionalFilterLayer, self).__init__()
@@ -177,12 +178,16 @@ class ConditionalFilterLayer(nn.Module):
                                      groups=ochn)
         self.filter_convloop = nn.Conv2d(ochn * ichn, ochn * ichn, kernel_size=1,
                                      groups=ochn)
-        self.intra_s = 10
-        self.bottom_num = 512
-
     def multi_class_dice_loss(self, mask, target, num_class):
-        target = torch.where(target==255,torch.full_like(target, 0), target)
-        target = F.one_hot(target.long(), num_class + 1)[:, :, :, 1:]
+        target = torch.where(target==255,torch.full_like(target, 151), target)
+        self.max_labelv, self.max_labeli = target.max(dim=1)
+        # print("zuida:",int(self.max_labelv.view(-1).min()), "- \t")
+        # print("zuixiao:", int(self.max_labelv.view(-1).max()), "! \t")
+        # if int(self.max_labelv.view(-1).max())==150:
+        #     input("150 found")
+        target = F.one_hot(target.long(), num_class+2)[:,:,:,:-2]
+        # target = F.one_hot(target.long(), num_class)
+        # target = F.one_hot(target.long(), num_class)[:, :, :, 1:]
         # print(target.size())
         target = target.permute(0, 3, 1, 2)
         mask = mask.contiguous().view(mask.size()[0], num_class, -1)
@@ -192,13 +197,15 @@ class ConditionalFilterLayer(nn.Module):
         a = torch.sum(mask * target, 2)
         b = torch.sum(mask * mask, 2) + 0.00001
         # b = torch.sum(mask * mask, 2) + 0.001
-        c = torch.sum(target * target, 2) + 0.00001
+        # c = torch.sum(target * target, 2) + 0.00001
+        c = torch.sum(target * target, 2) 
         # c = torch.sum(target * target, 2) + 0.001
-        d = (2 * a) / (b + c)
+        d = (2 * a + 0.00001) / (b + c + 0.00001)
         # return (1 - d).mean()
         return (1 - d).mean()
 
     def ata_loss(self, filters, target, num_class, batch_size):
+        #
         target_b = target.view(batch_size, -1)
         lb_shown = [torch.unique(target_b[bi], sorted=True).long() for bi in range(0, batch_size)]
         for i in range(0, batch_size):
@@ -230,7 +237,9 @@ class ConditionalFilterLayer(nn.Module):
         # return cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
         return 10*cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
 
-    def cfloop(self, filter_conv, feat, mask, x, b, k, h, w, delta_mode=False):
+    def cfloop(self, filter_conv, feat, mask, x, b, k, h, w, topk, delta_mode=False):
+
+        # cat_result = mask.topk(topk,dim=)
         class_feat = torch.bmm(mask, feat) / (h * w)
         class_feat = class_feat.view(b, k * self.ichn, 1, 1)
         filters = filter_conv(class_feat)
@@ -243,139 +252,59 @@ class ConditionalFilterLayer(nn.Module):
             pred = F.conv2d(x, filters, groups=b).view(b, k, h, w)
         return filters, pred
 
-    def forward(self, x, gt=None, num_class=None, delta_mode=False, dpm=None, softmax_mask=False, topk_filter=None, intra_weight=1.0):
+    def forward(self, x, gt=None, num_class=None, delta_mode=False, dpm=None):
         feat = x
-        pre_mask = x
-        d = x.shape[1]
+        # pre_mask = x
         mask = self.mask_conv(x)
         mask = torch.relu(mask)
         mask = self.mask_conv2(mask)
-        if softmax_mask:
-            mask = torch.softmax(mask, dim=1)
-        else:
-            mask = torch.sigmoid(mask)
-        # mask = torch.sigmoid(self.mask_conv(x))
-        # mask = torch.softmax(mask, dim=1)
+        # mask = torch.sigmoid(mask)
 
+        mask = torch.softmax(mask,dim=1)
+        
+        pre_mask = mask
+        # mask = torch.sigmoid(self.mask_conv(x))
         if gt is not None:
             dice_loss = self.multi_class_dice_loss(mask, gt, num_class)
+            # pass
         # b k h w
         b, k, h, w = mask.size()
+        # 挑选5类最大的来做mask
+        cat_value, cat_result = mask.topk(5, dim=1)
+        max_mask = F.one_hot(cat_result.long(), num_class)
+        class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
+        mask = torch.mul(class_selected_mask, mask)
+        # print("max 5")
+        # mask = torch.softmax(mask,dim=1)
         
-        if topk_filter is not None:
-            cat_value, cat_result = mask.topk(topk_filter, dim=1)
-            max_mask = F.one_hot(cat_result.long(), num_class)
-            class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
-            mask = torch.mul(class_selected_mask, mask)
-
-        # mask = mask.view(b, k, -1)
-
-        feat = feat.view(b, self.ichn, -1)
-        feat = feat.permute(0, 2, 1)
-        # x = x.view(-1, h, w).unsqueeze(0)
-        if dpm is not None:
-            feat = dpm(feat)
-        filters, pred = self.cfloop(self.filter_conv, feat, mask.view(b, k, -1), x.view(-1, h, w).unsqueeze(0), b, k, h, w, delta_mode)
-        if gt is not None and topk_filter is None:
-            # cat_value, cat_result = mask.topk(3, dim=1)
-            # max_mask = F.one_hot(cat_result.long(), num_class)
-            # class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
-            # mask = torch.mul(class_selected_mask, mask)
-            
-            # target_mask = torch.where(gt==255,torch.full_like(gt, 0), gt)
-            # target_mask = F.one_hot(target_mask.long(), num_class + 1)[:, :, :, 1:]
-
-            cat_value, cat_result = mask.max(dim=1)
-            max_mask = F.one_hot(cat_result.long(), num_class)
- 
-            class_selected_mask = max_mask.permute(0,3,1,2) #4*150*h*w
-            class_num = class_selected_mask.view(b,k,h*w).sum(dim=-1)
-            order_num, order_indice = torch.sort(class_num, dim=-1, descending=True)
-            
-            batch_index = torch.arange(0,b,1,device=order_indice.device)
-            i = 0
-            for i in range(self.intra_s):
-                # batch_index = torch.randint(0, b, b, decive=order_indice.device)
-                # iter_mask = class_selected_mask[batch_index, order_indice[:, i], :, :].unsqueeze(1).repeat(1, d, 1, 1)
-                # iter_num_flag = (class_num[:, i]>128).float().cuda()
-                iter_num = order_num[:, i]
-                iter_batch_num_mask = (iter_num >= self.bottom_num)
-                if bool(iter_batch_num_mask.sum()):
-                    iter_batch_index = batch_index[iter_batch_num_mask]
-                    iter_num = iter_num[iter_batch_num_mask]
-                    ib = iter_num.shape[0]
-
-                    # order_indice[:, i][iter_batch_num_mask]
-                    # iter_mask = class_selected_mask[batch_index, order_indice[:, i][iter_num>=256], :, :]
-                    iter_mask = class_selected_mask[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :, :]
-                    #################################
-                    # 这里是减少空间与计算量版本的双循环loss计算                    
-                    iter_selected_feat = x[iter_batch_num_mask].permute(0,2,3,1)[iter_mask.bool()] #B*H*W*D->BN*D
-                    batj_weight_feat = filters.view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
-                    j = 0
-                    p = 0
-                    iter_feat = []
-                    iter_weight_feat = []
-                    for j in range(ib):
-                        selected_temp = iter_selected_feat[p:p+int(iter_num[j]), :]
-                        iter_feat.append(selected_temp)
-                        # batj_mean_feat = selected_temp.mean(dim=0).repeat(int(iter_num[j]), 1)
-                        # iter_mean_feat.append(batj_mean_feat)
-                        iter_weight_feat.append(batj_weight_feat[j].repeat(int(iter_num[j]), 1))
-                        p += int(iter_num[j])
-                    # batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
-                    #               - 2*torch.mul(iter_feat[q], iter_mean_feat[q])
-                    #               + torch.mul(iter_mean_feat[q], iter_mean_feat[q])).mean().unsqueeze(0) 
-                    #               for q in range(ib)]
-                    batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
-                                  - 2*torch.mul(iter_feat[q], iter_weight_feat[q])
-                                  + torch.mul(iter_weight_feat[q], iter_weight_feat[q])).mean().unsqueeze(0) 
-                                  for q in range(ib)]
-                    batch_dist = torch.cat(batch_dist)
-                    batch_dist = batch_dist[~torch.isnan(batch_dist)].mean().unsqueeze(0)
-                    ##################################
-                    # 这里是空间有富裕的时候的并行计算
-                    # iter_mask = iter_mask.unsqueeze(1).repeat(1, d, 1, 1)
-                    # iter_feat = torch.mul(x[iter_batch_num_mask], iter_mask)
-                    # iter_mean_feat = iter_feat.view(ib, d, -1).sum(-1)/iter_num.view(ib, 1)
-                    # x2 = torch.mul(iter_feat, iter_feat)
-                    # y2 = torch.mul(iter_mean_feat, iter_mean_feat)
-                    # y2 = y2.view(ib, d, 1, 1).repeat(1, 1, h, w)
-                    # xy = torch.mul(iter_feat, iter_mean_feat.view(ib, d, 1, 1).repeat(1, 1, h, w))
-                    # batch_dist = x2 + y2 - 2*xy
-                    # batch_dist = batch_dist[~torch.isnan(batch_dist)]
-                    # batch_dist = batch_dist[~torch.isinf(batch_dist)].mean()
-                    if i == 0:
-                        intra_dist = batch_dist
-                    else:
-                        # intra_dist += batch_dist
-                        intra_dist = torch.cat((intra_dist, batch_dist), dim=0)
-                else:
-                    break
-            # intra_dist = intra_dist[~torch.isnan(intra_dist)].mean()
-            intra_dist = intra_dist.mean()*intra_weight
-
+        mask = mask.view(b, k, -1)#B*C*N
+        if True:
+            pass
+            # .squeeze().cpu().numpy().astype(np.uint8)
+            #想到一个加速方法 把batch搞成b*k 相当于把batch搞成类维度 这样可以避免for
+            #但是因为只有uint8 所以应该先只挑出来出现过的类别 然后把类别数排序把绝对值压缩下来
+            #一张图里面也不会出现512/4个类吧 然后换回去的时候只取对角线上的跟batch个数相等的方阵就可以降低维度回去了
+            # void_c,atest2 = cv2.connectedComponents(cat_result_sam.astype(np.uint8),connectivity=8)
+        feat = feat.view(b, self.ichn, -1)#B*C*N
+        feat = feat.permute(0, 2, 1)#B*N*C
+        x = x.view(-1, h, w).unsqueeze(0)
+        # if dpm is not None:
+        #     feat = dpm(feat)
+        filters, pred = self.cfloop(self.filter_conv, feat, mask, x, b, k, h, w, delta_mode)
         if gt is not None:
             # filters
             # cosdist, dist_matrix = self.ata_loss(filters+self.mask_conv.weight.repeat([b,1,1,1]).clone().detach(), gt, num_class, b)
             cosdist, dist_matrix = self.ata_loss(filters, gt, num_class, b)
-            result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
-            if topk_filter is None:
-                result_dic.update({'loss_intradist': intra_dist})
-            return pred, result_dic
-            # return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'loss_intradist': intra_dist,
-            # # return pred, {'loss_cosdist': cosdist,
-            #             #    'loss_cpcosdist': cpcosdist, 'pre_mask': pre_mask}
-            #                'pre_mask': pre_mask}
+            return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist,
+            # return pred, {'loss_cosdist': cosdist,
+            # return pred, {'loss_cosdist': cosdist,
+                        #    'loss_cpcosdist': cpcosdist, 'pre_mask': pre_mask}
+                           'pre_mask': pre_mask}
         return pred
 
 @HEADS.register_module()
 class CFDSASPPHead(DepthwiseSeparableASPPHead):
     def __init__(self, **kwargs):
-        self.intra_weight=kwargs.pop("intra_weight")
-
-        self.topk_filter = kwargs.pop("topk_filter")
-        self.softmax_mask = kwargs.pop("softmax_mask")
         super(CFDSASPPHead, self).__init__(**kwargs)
         self.cf_layer = ConditionalFilterLayer(512, self.num_classes)
     def forward(self, inputs, label=None):
@@ -404,15 +333,17 @@ class CFDSASPPHead(DepthwiseSeparableASPPHead):
         # output = self.cls_seg(output)
         if label is not None:
             b, useless, h, w = label.size()
+            # b, useless, h, w = output.size()
             aux_label = F.interpolate((label.view(b, 1, h, w)).float(),
-                                      scale_factor=0.25,
+                                      size=output.size()[2:],
                                       mode="nearest")
-            aux_label = aux_label.view(b, h // 4, w // 4)
+            aux_label = aux_label.squeeze(dim=1)
+            # aux_label = aux_label.view(b, h // 4, w // 4)
         else:
             aux_label = None
         if self.dropout is not None:
             dpm = self.dropout
-        final_output = self.cf_layer(output, aux_label, self.num_classes, False, softmax_mask=self.softmax_mask, topk_filter=self.topk_filter, intra_weight=self.intra_weight)
+        final_output = self.cf_layer(output, aux_label, self.num_classes, False)
         if label is not None:
             fm = final_output[0]
             dice_loss = final_output[1]
@@ -434,6 +365,11 @@ class CFDSASPPHead(DepthwiseSeparableASPPHead):
             size=(seg_label.shape[2:]),
             mode='bilinear',
             align_corners=(self.align_corners))
+        # loss['max_segl'] = max(seg_label)
+        # loss['loss_dice'] = self.cf_layer.multi_class_dice_loss(
+        #                                         pre_seg_logit,
+        #                                         seg_label.squeeze(dim=1),
+        #                                         self.num_classes)
         seg_logit = resize(
             input=seg_logit,
             size=(seg_label.shape[2:]),
