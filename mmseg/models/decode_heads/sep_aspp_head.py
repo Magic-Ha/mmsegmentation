@@ -177,8 +177,8 @@ class ConditionalFilterLayer(nn.Module):
                                      groups=ochn)
         self.filter_convloop = nn.Conv2d(ochn * ichn, ochn * ichn, kernel_size=1,
                                      groups=ochn)
-        self.intra_s = 10
-        self.bottom_num = 512
+        self.intra_s = 16
+        self.bottom_num = 4
 
     def multi_class_dice_loss(self, mask, target, num_class):
         target = torch.where(target==255,torch.full_like(target, 0), target)
@@ -263,11 +263,11 @@ class ConditionalFilterLayer(nn.Module):
         b, k, h, w = mask.size()
         
         if topk_filter is not None:
-            cat_value, cat_result = mask.topk(topk_filter, dim=1)
-            max_mask = F.one_hot(cat_result.long(), num_class)
-            class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
-            mask = torch.mul(class_selected_mask, mask)
-
+            # cat_value, cat_result = mask.topk(topk_filter, dim=1)
+            # max_mask = F.one_hot(cat_result.long(), num_class)
+            # class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
+            # mask = torch.mul(class_selected_mask, mask)
+            pass
         # mask = mask.view(b, k, -1)
 
         feat = feat.view(b, self.ichn, -1)
@@ -282,13 +282,14 @@ class ConditionalFilterLayer(nn.Module):
             # class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
             # mask = torch.mul(class_selected_mask, mask)
             
-            # target_mask = torch.where(gt==255,torch.full_like(gt, 0), gt)
-            # target_mask = F.one_hot(target_mask.long(), num_class + 1)[:, :, :, 1:]
+            target_mask = torch.where(gt==255,torch.full_like(gt, 0), gt)
+            target_mask = F.one_hot(target_mask.long(), num_class + 1)[:, :, :, 1:]
 
-            cat_value, cat_result = mask.max(dim=1)
-            max_mask = F.one_hot(cat_result.long(), num_class)
+            # cat_value, cat_result = mask.max(dim=1)
+            # max_mask = F.one_hot(cat_result.long(), num_class)
  
-            class_selected_mask = max_mask.permute(0,3,1,2) #4*150*h*w
+            # class_selected_mask = max_mask.permute(0,3,1,2) #4*150*h*w
+            class_selected_mask = target_mask.permute(0,3,1,2) #4*150*h*w
             class_num = class_selected_mask.view(b,k,h*w).sum(dim=-1)
             order_num, order_indice = torch.sort(class_num, dim=-1, descending=True)
             
@@ -311,7 +312,9 @@ class ConditionalFilterLayer(nn.Module):
                     #################################
                     # 这里是减少空间与计算量版本的双循环loss计算                    
                     iter_selected_feat = x[iter_batch_num_mask].permute(0,2,3,1)[iter_mask.bool()] #B*H*W*D->BN*D
-                    batj_weight_feat = filters.view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
+                    batj_weight_feat = filters.detach().view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
+                    # batj_weight_feat = filters.view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
+                    # print("test")
                     j = 0
                     p = 0
                     iter_feat = []
@@ -327,12 +330,20 @@ class ConditionalFilterLayer(nn.Module):
                     #               - 2*torch.mul(iter_feat[q], iter_mean_feat[q])
                     #               + torch.mul(iter_mean_feat[q], iter_mean_feat[q])).mean().unsqueeze(0) 
                     #               for q in range(ib)]
-                    batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
-                                  - 2*torch.mul(iter_feat[q], iter_weight_feat[q])
-                                  + torch.mul(iter_weight_feat[q], iter_weight_feat[q])).mean().unsqueeze(0) 
+                    # batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
+                    #               - 2*torch.mul(iter_feat[q], iter_weight_feat[q])
+                    #               + torch.mul(iter_weight_feat[q], iter_weight_feat[q])).mean().unsqueeze(0) 
+                    #               for q in range(ib)]
+                    # batch_dist = [1 - 2*torch.mul(iter_feat[q], iter_weight_feat[q]).mean().unsqueeze(0) 
+                    batch_dist = [(1 - (2*torch.sum(iter_feat[q] * iter_weight_feat[q])/(torch.sum(iter_feat[q] * iter_feat[q])+torch.sum(iter_weight_feat[q] * iter_weight_feat[q]) + 0.00001))).mean().unsqueeze(0)
+                    # batch_dist = [1-torch.mul(F.normalize(iter_feat[q], p=2, dim=1), F.normalize(iter_weight_feat[q], p=2, dim=1)).sum(dim=1)
+                    # batch_dist = [1-torch.mul(F.normalize(iter_feat[q], p=2, dim=1), F.normalize(iter_weight_feat[q], p=2, dim=1)).abs().sum(dim=1)
                                   for q in range(ib)]
+                    # batch_dist = torch.cat(batch_dist)
                     batch_dist = torch.cat(batch_dist)
-                    batch_dist = batch_dist[~torch.isnan(batch_dist)].mean().unsqueeze(0)
+
+                    # batch_dist = batch_dist[~torch.isnan(batch_dist)].mean().unsqueeze(0)
+                    
                     ##################################
                     # 这里是空间有富裕的时候的并行计算
                     # iter_mask = iter_mask.unsqueeze(1).repeat(1, d, 1, 1)
@@ -352,14 +363,17 @@ class ConditionalFilterLayer(nn.Module):
                         intra_dist = torch.cat((intra_dist, batch_dist), dim=0)
                 else:
                     break
-            # intra_dist = intra_dist[~torch.isnan(intra_dist)].mean()
-            intra_dist = intra_dist.mean()*intra_weight
+            intra_dist = intra_dist[~torch.isnan(intra_dist)].mean()*intra_weight
+            # intra_dist = intra_dist.mean()*intra_weight
 
         if gt is not None:
             # filters
             # cosdist, dist_matrix = self.ata_loss(filters+self.mask_conv.weight.repeat([b,1,1,1]).clone().detach(), gt, num_class, b)
             cosdist, dist_matrix = self.ata_loss(filters, gt, num_class, b)
-            result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
+            mask_conv2_cosdist, mask_conv2_distmatrix = self.ata_loss(self.mask_conv2.weight,  gt, num_class, 1)
+            # result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
+            # result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
+            result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'loss_mcosd':mask_conv2_cosdist, 'pre_mask': pre_mask}
             if topk_filter is None:
                 result_dic.update({'loss_intradist': intra_dist})
             return pred, result_dic

@@ -23,10 +23,10 @@ model = dict(
         c1_channels=48,
         # 这两个都是后来加得，如果冲突就删掉这两个
         # topk_filter=3,
-        # softmax_mask=False,
         softmax_mask=False,
+        # softmax_mask=True,
         topk_filter=None,
-        intra_weight=0.4,
+        intra_weight=0.2,
 
         dropout_ratio=0.1,
         num_classes=150,
