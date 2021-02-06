@@ -9,10 +9,8 @@ from mmcv.runner import force_fp32
 from ..losses import accuracy
 
 @HEADS.register_module()
-class FCNHead(BaseDecodeHead):
-    """Fully Convolution Networks for Semantic Segmentation.
-
-    This head is implemented of `FCNNet <https://arxiv.org/abs/1411.4038>`_.
+class CDFCNHead(BaseDecodeHead):
+    """Conditional Fully Convolution Classifier
 
     Args:
         num_convs (int): Number of convs in the head. Default: 2.
@@ -32,7 +30,7 @@ class FCNHead(BaseDecodeHead):
         self.kernel_size = kernel_size
         # if hasattr(kwargs,'freeze_all'):
         #     self.freeze_all = kwargs.pop('freeze_all')
-        super(FCNHead, self).__init__(**kwargs)
+        super(CDFCNHead, self).__init__(**kwargs)
         convs = []
         convs.append(
             ConvModule(
@@ -76,18 +74,7 @@ class FCNHead(BaseDecodeHead):
         filters = self.conv_seg.weight.repeat([batch_size, 1, 1, 1])
         # filters = F.normalize(filters, p=2, dim=1)
         dist_matrix = [torch.mm(filters.view(batch_size, num_class, -1)[bi],
-                                # filters.view(batch_size, num_class, -1)[bi].T).abs().mul(bmlc[bi]) for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).abs(), bmlc[bi].bool()) for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).abs().mul(bmlc[bi]) for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T)/2.).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T)/2.).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                filters.view(batch_size, num_class, -1)[bi].T).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
-                                
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]][:,lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask)[lb_shown[bi]] for bi in range(0, batch_size)]
-                                # filters.view(batch_size, num_class, -1)[bi].T).mul(bmlc[bi]) for bi in range(0, batch_size)]
+                                filters.view(batch_size, num_class, -1)[bi].T).mul(ata_mask).abs()[lb_shown[bi]] for bi in range(0, batch_size)]
 
         cosdist = torch.cat([dist_matrix[bi].mean().unsqueeze(0) for bi in range(0, batch_size)], dim=0)
         # return 10*cosdist[~torch.isnan(cosdist)].mean(), dist_matrix
@@ -117,7 +104,7 @@ class FCNHead(BaseDecodeHead):
             weight=seg_weight,
             ignore_index=self.ignore_index)
         loss['acc_seg'] = accuracy(seg_logit, seg_label)
-        # loss['ata_loss'] = ataloss
+        # loss['aux_ata_loss'] = ataloss
         return loss
 
     def forward(self, inputs):

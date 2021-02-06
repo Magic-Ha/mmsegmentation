@@ -262,13 +262,13 @@ class ConditionalFilterLayer(nn.Module):
         # b k h w
         b, k, h, w = mask.size()
         
-        if topk_filter is not None:
-            # cat_value, cat_result = mask.topk(topk_filter, dim=1)
-            # max_mask = F.one_hot(cat_result.long(), num_class)
-            # class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
-            # mask = torch.mul(class_selected_mask, mask)
-            pass
-        # mask = mask.view(b, k, -1)
+        # if topk_filter is not None:
+        #     # cat_value, cat_result = mask.topk(topk_filter, dim=1)
+        #     # max_mask = F.one_hot(cat_result.long(), num_class)
+        #     # class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
+        #     # mask = torch.mul(class_selected_mask, mask)
+        #     pass
+        # # mask = mask.view(b, k, -1)
 
         feat = feat.view(b, self.ichn, -1)
         feat = feat.permute(0, 2, 1)
@@ -276,95 +276,95 @@ class ConditionalFilterLayer(nn.Module):
         if dpm is not None:
             feat = dpm(feat)
         filters, pred = self.cfloop(self.filter_conv, feat, mask.view(b, k, -1), x.view(-1, h, w).unsqueeze(0), b, k, h, w, delta_mode)
-        if gt is not None and topk_filter is None:
-            # cat_value, cat_result = mask.topk(3, dim=1)
-            # max_mask = F.one_hot(cat_result.long(), num_class)
-            # class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
-            # mask = torch.mul(class_selected_mask, mask)
+        # if gt is not None and topk_filter is None:
+        #     # cat_value, cat_result = mask.topk(3, dim=1)
+        #     # max_mask = F.one_hot(cat_result.long(), num_class)
+        #     # class_selected_mask = max_mask.sum(dim=1).permute(0,3,1,2).float()
+        #     # mask = torch.mul(class_selected_mask, mask)
             
-            target_mask = torch.where(gt==255,torch.full_like(gt, 0), gt)
-            target_mask = F.one_hot(target_mask.long(), num_class + 1)[:, :, :, 1:]
+        #     target_mask = torch.where(gt==255,torch.full_like(gt, 0), gt)
+        #     target_mask = F.one_hot(target_mask.long(), num_class + 1)[:, :, :, 1:]
 
-            # cat_value, cat_result = mask.max(dim=1)
-            # max_mask = F.one_hot(cat_result.long(), num_class)
+        #     # cat_value, cat_result = mask.max(dim=1)
+        #     # max_mask = F.one_hot(cat_result.long(), num_class)
  
-            # class_selected_mask = max_mask.permute(0,3,1,2) #4*150*h*w
-            class_selected_mask = target_mask.permute(0,3,1,2) #4*150*h*w
-            class_num = class_selected_mask.view(b,k,h*w).sum(dim=-1)
-            order_num, order_indice = torch.sort(class_num, dim=-1, descending=True)
+        #     # class_selected_mask = max_mask.permute(0,3,1,2) #4*150*h*w
+        #     class_selected_mask = target_mask.permute(0,3,1,2) #4*150*h*w
+        #     class_num = class_selected_mask.view(b,k,h*w).sum(dim=-1)
+        #     order_num, order_indice = torch.sort(class_num, dim=-1, descending=True)
             
-            batch_index = torch.arange(0,b,1,device=order_indice.device)
-            i = 0
-            for i in range(self.intra_s):
-                # batch_index = torch.randint(0, b, b, decive=order_indice.device)
-                # iter_mask = class_selected_mask[batch_index, order_indice[:, i], :, :].unsqueeze(1).repeat(1, d, 1, 1)
-                # iter_num_flag = (class_num[:, i]>128).float().cuda()
-                iter_num = order_num[:, i]
-                iter_batch_num_mask = (iter_num >= self.bottom_num)
-                if bool(iter_batch_num_mask.sum()):
-                    iter_batch_index = batch_index[iter_batch_num_mask]
-                    iter_num = iter_num[iter_batch_num_mask]
-                    ib = iter_num.shape[0]
+        #     batch_index = torch.arange(0,b,1,device=order_indice.device)
+        #     i = 0
+        #     for i in range(self.intra_s):
+        #         # batch_index = torch.randint(0, b, b, decive=order_indice.device)
+        #         # iter_mask = class_selected_mask[batch_index, order_indice[:, i], :, :].unsqueeze(1).repeat(1, d, 1, 1)
+        #         # iter_num_flag = (class_num[:, i]>128).float().cuda()
+        #         iter_num = order_num[:, i]
+        #         iter_batch_num_mask = (iter_num >= self.bottom_num)
+        #         if bool(iter_batch_num_mask.sum()):
+        #             iter_batch_index = batch_index[iter_batch_num_mask]
+        #             iter_num = iter_num[iter_batch_num_mask]
+        #             ib = iter_num.shape[0]
 
-                    # order_indice[:, i][iter_batch_num_mask]
-                    # iter_mask = class_selected_mask[batch_index, order_indice[:, i][iter_num>=256], :, :]
-                    iter_mask = class_selected_mask[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :, :]
-                    #################################
-                    # 这里是减少空间与计算量版本的双循环loss计算                    
-                    iter_selected_feat = x[iter_batch_num_mask].permute(0,2,3,1)[iter_mask.bool()] #B*H*W*D->BN*D
-                    batj_weight_feat = filters.detach().view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
-                    # batj_weight_feat = filters.view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
-                    # print("test")
-                    j = 0
-                    p = 0
-                    iter_feat = []
-                    iter_weight_feat = []
-                    for j in range(ib):
-                        selected_temp = iter_selected_feat[p:p+int(iter_num[j]), :]
-                        iter_feat.append(selected_temp)
-                        # batj_mean_feat = selected_temp.mean(dim=0).repeat(int(iter_num[j]), 1)
-                        # iter_mean_feat.append(batj_mean_feat)
-                        iter_weight_feat.append(batj_weight_feat[j].repeat(int(iter_num[j]), 1))
-                        p += int(iter_num[j])
-                    # batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
-                    #               - 2*torch.mul(iter_feat[q], iter_mean_feat[q])
-                    #               + torch.mul(iter_mean_feat[q], iter_mean_feat[q])).mean().unsqueeze(0) 
-                    #               for q in range(ib)]
-                    # batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
-                    #               - 2*torch.mul(iter_feat[q], iter_weight_feat[q])
-                    #               + torch.mul(iter_weight_feat[q], iter_weight_feat[q])).mean().unsqueeze(0) 
-                    #               for q in range(ib)]
-                    # batch_dist = [1 - 2*torch.mul(iter_feat[q], iter_weight_feat[q]).mean().unsqueeze(0) 
-                    batch_dist = [(1 - (2*torch.sum(iter_feat[q] * iter_weight_feat[q])/(torch.sum(iter_feat[q] * iter_feat[q])+torch.sum(iter_weight_feat[q] * iter_weight_feat[q]) + 0.00001))).mean().unsqueeze(0)
-                    # batch_dist = [1-torch.mul(F.normalize(iter_feat[q], p=2, dim=1), F.normalize(iter_weight_feat[q], p=2, dim=1)).sum(dim=1)
-                    # batch_dist = [1-torch.mul(F.normalize(iter_feat[q], p=2, dim=1), F.normalize(iter_weight_feat[q], p=2, dim=1)).abs().sum(dim=1)
-                                  for q in range(ib)]
-                    # batch_dist = torch.cat(batch_dist)
-                    batch_dist = torch.cat(batch_dist)
+        #             # order_indice[:, i][iter_batch_num_mask]
+        #             # iter_mask = class_selected_mask[batch_index, order_indice[:, i][iter_num>=256], :, :]
+        #             iter_mask = class_selected_mask[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :, :]
+        #             #################################
+        #             # 这里是减少空间与计算量版本的双循环loss计算                    
+        #             iter_selected_feat = x[iter_batch_num_mask].permute(0,2,3,1)[iter_mask.bool()] #B*H*W*D->BN*D
+        #             batj_weight_feat = filters.detach().view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
+        #             # batj_weight_feat = filters.view(b,k,d)[iter_batch_index, order_indice[:, i][iter_batch_num_mask], :]
+        #             # print("test")
+        #             j = 0
+        #             p = 0
+        #             iter_feat = []
+        #             iter_weight_feat = []
+        #             for j in range(ib):
+        #                 selected_temp = iter_selected_feat[p:p+int(iter_num[j]), :]
+        #                 iter_feat.append(selected_temp)
+        #                 # batj_mean_feat = selected_temp.mean(dim=0).repeat(int(iter_num[j]), 1)
+        #                 # iter_mean_feat.append(batj_mean_feat)
+        #                 iter_weight_feat.append(batj_weight_feat[j].repeat(int(iter_num[j]), 1))
+        #                 p += int(iter_num[j])
+        #             # batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
+        #             #               - 2*torch.mul(iter_feat[q], iter_mean_feat[q])
+        #             #               + torch.mul(iter_mean_feat[q], iter_mean_feat[q])).mean().unsqueeze(0) 
+        #             #               for q in range(ib)]
+        #             # batch_dist = [( torch.mul(iter_feat[q], iter_feat[q])
+        #             #               - 2*torch.mul(iter_feat[q], iter_weight_feat[q])
+        #             #               + torch.mul(iter_weight_feat[q], iter_weight_feat[q])).mean().unsqueeze(0) 
+        #             #               for q in range(ib)]
+        #             # batch_dist = [1 - 2*torch.mul(iter_feat[q], iter_weight_feat[q]).mean().unsqueeze(0) 
+        #             batch_dist = [(1 - (2*torch.sum(iter_feat[q] * iter_weight_feat[q])/(torch.sum(iter_feat[q] * iter_feat[q])+torch.sum(iter_weight_feat[q] * iter_weight_feat[q]) + 0.00001))).mean().unsqueeze(0)
+        #             # batch_dist = [1-torch.mul(F.normalize(iter_feat[q], p=2, dim=1), F.normalize(iter_weight_feat[q], p=2, dim=1)).sum(dim=1)
+        #             # batch_dist = [1-torch.mul(F.normalize(iter_feat[q], p=2, dim=1), F.normalize(iter_weight_feat[q], p=2, dim=1)).abs().sum(dim=1)
+        #                           for q in range(ib)]
+        #             # batch_dist = torch.cat(batch_dist)
+        #             batch_dist = torch.cat(batch_dist)
 
-                    # batch_dist = batch_dist[~torch.isnan(batch_dist)].mean().unsqueeze(0)
+        #             # batch_dist = batch_dist[~torch.isnan(batch_dist)].mean().unsqueeze(0)
                     
-                    ##################################
-                    # 这里是空间有富裕的时候的并行计算
-                    # iter_mask = iter_mask.unsqueeze(1).repeat(1, d, 1, 1)
-                    # iter_feat = torch.mul(x[iter_batch_num_mask], iter_mask)
-                    # iter_mean_feat = iter_feat.view(ib, d, -1).sum(-1)/iter_num.view(ib, 1)
-                    # x2 = torch.mul(iter_feat, iter_feat)
-                    # y2 = torch.mul(iter_mean_feat, iter_mean_feat)
-                    # y2 = y2.view(ib, d, 1, 1).repeat(1, 1, h, w)
-                    # xy = torch.mul(iter_feat, iter_mean_feat.view(ib, d, 1, 1).repeat(1, 1, h, w))
-                    # batch_dist = x2 + y2 - 2*xy
-                    # batch_dist = batch_dist[~torch.isnan(batch_dist)]
-                    # batch_dist = batch_dist[~torch.isinf(batch_dist)].mean()
-                    if i == 0:
-                        intra_dist = batch_dist
-                    else:
-                        # intra_dist += batch_dist
-                        intra_dist = torch.cat((intra_dist, batch_dist), dim=0)
-                else:
-                    break
-            intra_dist = intra_dist[~torch.isnan(intra_dist)].mean()*intra_weight
-            # intra_dist = intra_dist.mean()*intra_weight
+        #             ##################################
+        #             # 这里是空间有富裕的时候的并行计算
+        #             # iter_mask = iter_mask.unsqueeze(1).repeat(1, d, 1, 1)
+        #             # iter_feat = torch.mul(x[iter_batch_num_mask], iter_mask)
+        #             # iter_mean_feat = iter_feat.view(ib, d, -1).sum(-1)/iter_num.view(ib, 1)
+        #             # x2 = torch.mul(iter_feat, iter_feat)
+        #             # y2 = torch.mul(iter_mean_feat, iter_mean_feat)
+        #             # y2 = y2.view(ib, d, 1, 1).repeat(1, 1, h, w)
+        #             # xy = torch.mul(iter_feat, iter_mean_feat.view(ib, d, 1, 1).repeat(1, 1, h, w))
+        #             # batch_dist = x2 + y2 - 2*xy
+        #             # batch_dist = batch_dist[~torch.isnan(batch_dist)]
+        #             # batch_dist = batch_dist[~torch.isinf(batch_dist)].mean()
+        #             if i == 0:
+        #                 intra_dist = batch_dist
+        #             else:
+        #                 # intra_dist += batch_dist
+        #                 intra_dist = torch.cat((intra_dist, batch_dist), dim=0)
+        #         else:
+        #             break
+        #     intra_dist = intra_dist[~torch.isnan(intra_dist)].mean()*intra_weight
+        #     # intra_dist = intra_dist.mean()*intra_weight
 
         if gt is not None:
             # filters
@@ -372,10 +372,10 @@ class ConditionalFilterLayer(nn.Module):
             cosdist, dist_matrix = self.ata_loss(filters, gt, num_class, b)
             mask_conv2_cosdist, mask_conv2_distmatrix = self.ata_loss(self.mask_conv2.weight,  gt, num_class, 1)
             # result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
-            # result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
-            result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'loss_mcosd':mask_conv2_cosdist, 'pre_mask': pre_mask}
-            if topk_filter is None:
-                result_dic.update({'loss_intradist': intra_dist})
+            result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'pre_mask': pre_mask}
+            # result_dic = {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'loss_mcosd': mask_conv2_cosdist, 'pre_mask': pre_mask}
+            # if topk_filter is None:
+            #     result_dic.update({'loss_intradist': intra_dist})
             return pred, result_dic
             # return pred, {'loss_CFlayer': dice_loss, 'loss_cosdist': cosdist, 'loss_intradist': intra_dist,
             # # return pred, {'loss_cosdist': cosdist,
@@ -414,7 +414,8 @@ class CFDSASPPHead(DepthwiseSeparableASPPHead):
                 align_corners=self.align_corners)
             output = torch.cat([output, c1_output], dim=1)
         output = self.sep_bottleneck(output)
-        # output = self.cls_seg(output)
+        
+        output_branch = self.cls_seg(output)
         # output = self.cls_seg(output)
         if label is not None:
             b, useless, h, w = label.size()
@@ -427,9 +428,13 @@ class CFDSASPPHead(DepthwiseSeparableASPPHead):
         if self.dropout is not None:
             dpm = self.dropout
         final_output = self.cf_layer(output, aux_label, self.num_classes, False, softmax_mask=self.softmax_mask, topk_filter=self.topk_filter, intra_weight=self.intra_weight)
+        # conv_seg_cosdist, conv_seg_dist_matrix = self.cf_layer.ata_loss(self.conv_seg.weight, aux_label, self.num_classes, 1)
         if label is not None:
-            fm = final_output[0]
+            # fm = final_output[0]
             dice_loss = final_output[1]
+            dice_loss['o_b'] = output_branch
+            # dice_loss['loss_ob_ata'] = 0.4*conv_seg_cosdist
+            # return 0.5*(fm+output_branch), dice_loss
             return fm, dice_loss
         else:
             fm = final_output
@@ -443,8 +448,10 @@ class CFDSASPPHead(DepthwiseSeparableASPPHead):
     def losses(self, seg_logit, extra_loss, seg_label, error_map=None):
         """Compute segmentation loss."""
         loss = dict()
+        extra_loss.pop('pre_mask')
         pre_seg_logit = resize(
-            input=extra_loss.pop('pre_mask'),
+            # input=extra_loss.pop('pre_mask'),
+            input=extra_loss.pop('o_b'),
             size=(seg_label.shape[2:]),
             mode='bilinear',
             align_corners=(self.align_corners))
@@ -471,18 +478,18 @@ class CFDSASPPHead(DepthwiseSeparableASPPHead):
             seg_label,
             weight=seg_weight,
             ignore_index=(self.ignore_index))
-        # loss['losg_pre_seg'] = 0.4*self.loss_decode(
-        #     pre_seg_logit,
-        #     seg_label,
-        #     weight=seg_weight,
-        #     ignore_index=(self.ignore_index))
+        loss['loss_ob_seg'] = 0.4*self.loss_decode(
+            pre_seg_logit,
+            seg_label,
+            weight=seg_weight,
+            ignore_index=(self.ignore_index))
         # loss['coarse_loss_seg'] = self.loss_decode(
         #     coarse_logit,
         #     seg_label,
         #     weight=coarse_seg_weight,
         #     ignore_index=(self.ignore_index))
         loss['acc_seg'] = accuracy(seg_logit, seg_label)
-        # loss['acc_pre_seg'] = accuracy(pre_seg_logit, seg_label)
+        loss['acc_ob_seg'] = accuracy(pre_seg_logit, seg_label)
 
         loss.update(extra_loss)
 
